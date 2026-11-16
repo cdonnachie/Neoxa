@@ -86,6 +86,11 @@ public:
     bool EraseAssetAddressQuantity(const std::string &assetName, const std::string &address);
     bool EraseAddressAssetQuantity(const std::string &address, const std::string &assetName);
 
+    //! Bulk operations used by -reindexassets
+    bool EraseAllAssets();
+    bool EraseAllAddressQuantities();
+    bool WriteAssetAddressQuantities(const std::map<std::pair<std::string, std::string>, CAmount>& balances);
+
     // Helper functions
     bool LoadAssets();
     bool AssetDir(std::vector<CDatabasedAssetData>& assets, const std::string filter, const size_t count, const long start);

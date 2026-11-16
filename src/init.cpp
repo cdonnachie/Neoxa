@@ -536,6 +536,7 @@ std::string HelpMessage(HelpMessageMode mode)
             "Warning: Reverting this setting requires re-downloading the entire blockchain. "
             "(default: 0 = disable pruning blocks, 1 = allow manual pruning via RPC, >%u = automatically prune block files to stay under the specified target size in MiB)"), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
     strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks"));
+    strUsage += HelpMessageOpt("-reindexassets", _("Rebuild the asset database from the currently indexed blocks and the UTXO set. Required to change -assetindex, and much faster than -reindex"));
     strUsage += HelpMessageOpt("-reindex", _("Rebuild chain state and block index from the blk*.dat files on disk"));
 #ifndef WIN32
     strUsage += HelpMessageOpt("-sysperms", _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)"));
@@ -1809,6 +1810,7 @@ bool AppInitMain(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     fReindex = gArgs.GetBoolArg("-reindex", false);
     bool fReindexChainState = gArgs.GetBoolArg("-reindex-chainstate", false);
+    bool fReindexAssets = gArgs.GetBoolArg("-reindexassets", false);
 
     // cache size calculations
     int64_t nTotalCache = (gArgs.GetArg("-dbcache", nDefaultDbCache) << 20);
@@ -1997,7 +1999,7 @@ bool AppInitMain(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // adds -assetindex to an existing datadir silently keeps the
                 // flag stored on disk, and the asset RPCs go on reporting that
                 // -assetindex is disabled with no indication why.
-                if (fAssetIndex != gArgs.GetBoolArg("-assetindex", DEFAULT_ASSETINDEX)) {
+                if (!fReindexAssets && fAssetIndex != gArgs.GetBoolArg("-assetindex", DEFAULT_ASSETINDEX)) {
                     strLoadError = _("You need to rebuild the database using -reindex to change -assetindex");
                     break;
                 }
@@ -2127,6 +2129,26 @@ bool AppInitMain(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
     if (fLoaded) {
         LogPrintf(" block index %15dms\n", GetTimeMillis() - nStart);
+    }
+
+    // Rebuild the asset databases if asked. Both the metadata and the address
+    // level index are recoverable from data already on disk, so turning on
+    // -assetindex does not have to cost a full chain reindex. Skipped under
+    // -reindex, where the chain is empty at this point and the asset databases
+    // are rebuilt by the resync anyway.
+    if (fReindexAssets && fLoaded && !fReindex) {
+        uiInterface.InitMessage(_("Rebuilding asset database..."));
+
+        if (!ReindexAssets())
+            return InitError(_("Failed to rebuild the asset database. You will need to rebuild using -reindex"));
+
+        // The rebuild is what makes a changed -assetindex setting valid, so
+        // record the new state now that it has succeeded.
+        fAssetIndex = gArgs.GetBoolArg("-assetindex", DEFAULT_ASSETINDEX);
+        if (!pblocktree->WriteFlag("assetindex", fAssetIndex))
+            return InitError(_("Failed to record the asset index state"));
+
+        LogPrintf("Asset database rebuilt, asset index %s\n", fAssetIndex ? "enabled" : "disabled");
     }
 
     fs::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;

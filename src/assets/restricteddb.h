@@ -31,6 +31,10 @@ public:
     bool ReadQualifierAddress(const std::string &address, const std::string &tag);
     bool EraseQualifierAddress(const std::string &address, const std::string &tag);
 
+    //! Rebuild the qualifier -> address index from the address -> qualifier
+    //! index, used by -reindexassets
+    bool RebuildQualifierAddressIndex();
+
     // Database of Blacklist addresses
     bool WriteRestrictedAddress(const std::string& address, const std::string& assetName);
     bool ReadRestrictedAddress(const std::string& address, const std::string& assetName);

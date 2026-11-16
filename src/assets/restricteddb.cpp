@@ -71,6 +71,71 @@ bool CRestrictedDB::EraseQualifierAddress(const std::string &address, const std:
     return Erase(std::make_pair(QULAIFIER_ADDRESS_FLAG, std::make_pair(tag, address)));
 }
 
+bool CRestrictedDB::RebuildQualifierAddressIndex()
+{
+    // QULAIFIER_ADDRESS_FLAG <tag, address> is the reverse of
+    // ADDRESS_QULAIFIER_FLAG <address, tag>. Only the reverse index is gated on
+    // -assetindex; the forward one is written either way, so the reverse index
+    // can be rebuilt from it without reading a single block.
+    size_t nErased = 0;
+    {
+        CDBBatch batch(*this);
+        std::unique_ptr<CDBIterator> pcursor(NewIterator());
+        pcursor->Seek(std::make_pair(QULAIFIER_ADDRESS_FLAG, std::make_pair(std::string(), std::string())));
+
+        while (pcursor->Valid()) {
+            boost::this_thread::interruption_point();
+
+            std::pair<char, std::pair<std::string, std::string> > key;
+            if (!pcursor->GetKey(key) || key.first != QULAIFIER_ADDRESS_FLAG)
+                break;
+
+            batch.Erase(key);
+            ++nErased;
+            pcursor->Next();
+        }
+
+        // Commit the removals before writing anything, so a key that is both
+        // erased and rewritten cannot be lost to batch ordering.
+        if (!WriteBatch(batch, true))
+            return error("%s : failed to erase the qualifier address index", __func__);
+    }
+
+    size_t nWritten = 0;
+    {
+        CDBBatch batch(*this);
+        std::unique_ptr<CDBIterator> pcursor(NewIterator());
+        pcursor->Seek(std::make_pair(ADDRESS_QULAIFIER_FLAG, std::make_pair(std::string(), std::string())));
+
+        const int8_t i = 1;
+        while (pcursor->Valid()) {
+            boost::this_thread::interruption_point();
+
+            std::pair<char, std::pair<std::string, std::string> > key;
+            if (!pcursor->GetKey(key) || key.first != ADDRESS_QULAIFIER_FLAG)
+                break;
+
+            // forward key is <address, tag>, reverse key is <tag, address>
+            batch.Write(std::make_pair(QULAIFIER_ADDRESS_FLAG,
+                                       std::make_pair(key.second.second, key.second.first)), i);
+
+            if (++nWritten % 100000 == 0) {
+                if (!WriteBatch(batch))
+                    return error("%s : failed to write a batch of the qualifier address index", __func__);
+                batch.Clear();
+            }
+
+            pcursor->Next();
+        }
+
+        if (!WriteBatch(batch, true))
+            return error("%s : failed to write the qualifier address index", __func__);
+    }
+
+    LogPrintf("%s : removed %u and wrote %u qualifier address entries\n", __func__, nErased, nWritten);
+    return true;
+}
+
 
 // Address Restriction
 bool CRestrictedDB::WriteRestrictedAddress(const std::string& address, const std::string& assetName)

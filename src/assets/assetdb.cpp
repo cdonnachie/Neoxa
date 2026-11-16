@@ -84,6 +84,113 @@ bool CAssetsDB::EraseAddressAssetQuantity(const std::string &address, const std:
 
 bool EraseAddressAssetQuantity(const std::string &address, const std::string &assetName);
 
+bool CAssetsDB::EraseAllAssets()
+{
+    // Erase every ASSET_FLAG record, the asset metadata. -reindexassets
+    // rebuilds these from the issuance and reissuance outputs in the blocks.
+    CDBBatch batch(*this);
+    size_t nErased = 0;
+
+    std::unique_ptr<CDBIterator> pcursor(NewIterator());
+    pcursor->Seek(std::make_pair(ASSET_FLAG, std::string()));
+
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
+
+        std::pair<char, std::string> key;
+        if (!pcursor->GetKey(key) || key.first != ASSET_FLAG)
+            break;
+
+        batch.Erase(key);
+
+        if (++nErased % 100000 == 0) {
+            if (!WriteBatch(batch))
+                return error("%s : failed to erase a batch of asset metadata", __func__);
+            batch.Clear();
+        }
+
+        pcursor->Next();
+    }
+
+    if (!WriteBatch(batch, true))
+        return error("%s : failed to erase the asset metadata", __func__);
+
+    LogPrintf("%s : removed %u asset metadata records\n", __func__, nErased);
+    return true;
+}
+
+bool CAssetsDB::EraseAllAddressQuantities()
+{
+    // ASSET_ADDRESS_QUANTITY_FLAG is keyed <asset, address> and
+    // ADDRESS_ASSET_QUANTITY_FLAG is the same balance keyed <address, asset>.
+    // Wipe the pair together: dropping only one of them would leave
+    // listaddressesbyasset and listassetbalancesbyaddress disagreeing.
+    const char flags[2] = {ASSET_ADDRESS_QUANTITY_FLAG, ADDRESS_ASSET_QUANTITY_FLAG};
+
+    CDBBatch batch(*this);
+    size_t nErased = 0;
+
+    for (const char flag : flags) {
+        std::unique_ptr<CDBIterator> pcursor(NewIterator());
+        pcursor->Seek(std::make_pair(flag, std::make_pair(std::string(), std::string())));
+
+        while (pcursor->Valid()) {
+            boost::this_thread::interruption_point();
+
+            std::pair<char, std::pair<std::string, std::string> > key;
+            if (!pcursor->GetKey(key) || key.first != flag)
+                break;
+
+            batch.Erase(key);
+
+            if (++nErased % 100000 == 0) {
+                if (!WriteBatch(batch))
+                    return error("%s : failed to erase a batch of the address index", __func__);
+                batch.Clear();
+            }
+
+            pcursor->Next();
+        }
+    }
+
+    if (!WriteBatch(batch, true))
+        return error("%s : failed to erase the address index", __func__);
+
+    LogPrintf("%s : removed %u address index entries\n", __func__, nErased);
+    return true;
+}
+
+bool CAssetsDB::WriteAssetAddressQuantities(const std::map<std::pair<std::string, std::string>, CAmount>& balances)
+{
+    // Each balance is written under both orderings so the two directional
+    // lookups stay in step.
+    CDBBatch batch(*this);
+    size_t nWritten = 0;
+
+    for (const auto& balance : balances) {
+        boost::this_thread::interruption_point();
+
+        const std::string& assetName = balance.first.first;
+        const std::string& address = balance.first.second;
+
+        batch.Write(std::make_pair(ASSET_ADDRESS_QUANTITY_FLAG, std::make_pair(assetName, address)), balance.second);
+        batch.Write(std::make_pair(ADDRESS_ASSET_QUANTITY_FLAG, std::make_pair(address, assetName)), balance.second);
+
+        nWritten += 2;
+        if (nWritten % 100000 == 0) {
+            if (!WriteBatch(batch))
+                return error("%s : failed to write a batch of the address index", __func__);
+            batch.Clear();
+        }
+    }
+
+    if (!WriteBatch(batch, true))
+        return error("%s : failed to write the address index", __func__);
+
+    LogPrintf("%s : wrote %u address index entries for %u balances\n", __func__, nWritten, balances.size());
+    return true;
+}
+
 bool CAssetsDB::WriteBlockUndoAssetData(const uint256& blockhash, const std::vector<std::pair<std::string, CBlockAssetUndo> >& assetUndoData)
 {
     return Write(std::make_pair(BLOCK_ASSET_UNDO_DATA, blockhash), assetUndoData);

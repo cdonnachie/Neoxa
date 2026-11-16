@@ -468,6 +468,10 @@ public:
 };
 
 /** Replay blocks that aren't fully applied to the database. */
+/** Rebuild the asset metadata from the blocks and the asset address index from
+ *  the UTXO set, without redownloading or revalidating the chain. */
+bool ReindexAssets();
+
 bool ReplayBlocks(const CChainParams& params, CCoinsView* view);
 
 /** Find the last common block between the parameter chain and a locator. */

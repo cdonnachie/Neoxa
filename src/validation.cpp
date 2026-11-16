@@ -4990,6 +4990,245 @@ static bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs,
     return true;
 }
 
+// Rebuild the asset databases without redownloading or revalidating the chain.
+//
+// Enabling -assetindex on an existing node used to mean a full -reindex, which
+// on this chain means re-verifying millions of blocks to recover data that is
+// already sitting on disk. Nothing about the asset databases requires that:
+//
+//   Phase 1, metadata. The name, supply, units, IPFS hash and verifier string
+//   of an asset come entirely from its issuance and reissuance outputs, so the
+//   'A' records can be rebuilt by walking the blocks and looking at those
+//   outputs alone - no inputs, no transfers, no script or signature checking.
+//
+//   Phase 2, balances. Replaying transfers cannot produce balances without a
+//   coins view, because an input has to be debited from whoever held it. The
+//   UTXO set already is that answer: every unspent asset output is a live
+//   balance, so summing them by <asset, address> gives the current totals
+//   directly.
+//
+//   Phase 3, the qualifier reverse index, which is a straight reordering of a
+//   forward index that is written whatever -assetindex is set to.
+//
+// The per-transaction dispatch in phase 1 mirrors the asset half of AddCoins in
+// coins.cpp. If a new asset type is added there, it needs adding here too.
+bool ReindexAssets()
+{
+    LOCK(cs_main);
+
+    if (!AreAssetsDeployed())
+        return error("%s : assets are not deployed on this chain", __func__);
+
+    if (!passetsdb || !passets || !passetsCache)
+        return error("%s : the asset databases are not open", __func__);
+
+    const int nTipHeight = chainActive.Height();
+    if (nTipHeight < 1) {
+        LogPrintf("%s : the chain is empty, nothing to rebuild\n", __func__);
+        return true;
+    }
+
+    // Start both phases from a known-clean state.
+    if (!passetsdb->EraseAllAssets())
+        return error("%s : failed to clear the asset metadata", __func__);
+
+    if (!passetsdb->EraseAllAddressQuantities())
+        return error("%s : failed to clear the address index", __func__);
+
+    delete passets;
+    passets = new CAssetsCache();
+    passetsCache->Clear();
+
+    // -------------------------------------------------------------------
+    // Phase 1: rebuild the asset metadata from the issuance outputs.
+    // -------------------------------------------------------------------
+    LogPrintf("%s : phase 1, rebuilding asset metadata from %d blocks\n", __func__, nTipHeight);
+    uiInterface.InitMessage(_("Rebuilding asset metadata..."));
+
+    const int nLogInterval = 10000;
+    int nBlocksProcessed = 0;
+
+    for (int nHeight = 1; nHeight <= nTipHeight; nHeight++) {
+        boost::this_thread::interruption_point();
+        if (ShutdownRequested())
+            return error("%s : interrupted at height %d during the metadata pass", __func__, nHeight);
+
+        const CBlockIndex* pindex = chainActive[nHeight];
+        if (!pindex)
+            continue;
+
+        CBlock block;
+        if (!ReadBlockFromDisk(block, pindex, Params().GetConsensus()))
+            return error("%s : failed to read the block at height %d", __func__, nHeight);
+
+        CAssetsCache assetCache;
+
+        for (const auto& ptx : block.vtx) {
+            const CTransaction& tx = *ptx;
+            if (tx.IsCoinBase())
+                continue;
+
+            if (tx.IsNewAsset()) {
+                CNewAsset asset;
+                std::string strAddress;
+                if (AssetFromTransaction(tx, asset, strAddress)) {
+                    assetCache.AddNewAsset(asset, strAddress, pindex->nHeight, pindex->GetBlockHash());
+
+                    std::string ownerName, ownerAddress;
+                    if (OwnerFromTransaction(tx, ownerName, ownerAddress))
+                        assetCache.AddOwnerAsset(ownerName, ownerAddress);
+                }
+            } else if (tx.IsReissueAsset()) {
+                CReissueAsset reissue;
+                std::string strAddress;
+                if (ReissueAssetFromTransaction(tx, reissue, strAddress)) {
+                    // AddCoins assumes the reissue output is the last one. Find
+                    // it instead: a reissue transaction may carry change or
+                    // null-data outputs after it.
+                    int nReissueIndex = -1;
+                    for (int n = (int)tx.vout.size() - 1; n >= 0; n--) {
+                        int nType = 0;
+                        bool fIsOwner = false;
+                        if (tx.vout[n].scriptPubKey.IsAssetScript(nType, fIsOwner) && nType == TX_REISSUE_ASSET) {
+                            nReissueIndex = n;
+                            break;
+                        }
+                    }
+
+                    if (nReissueIndex >= 0)
+                        assetCache.AddReissueAsset(reissue, strAddress, COutPoint(tx.GetHash(), nReissueIndex));
+                }
+            } else if (tx.IsNewUniqueAsset()) {
+                for (int n = 0; n < (int)tx.vout.size(); n++) {
+                    if (!IsScriptNewUniqueAsset(tx.vout[n].scriptPubKey))
+                        continue;
+
+                    CNewAsset asset;
+                    std::string strAddress;
+                    if (AssetFromScript(tx.vout[n].scriptPubKey, asset, strAddress))
+                        assetCache.AddNewAsset(asset, strAddress, pindex->nHeight, pindex->GetBlockHash());
+                }
+            } else if (tx.IsNewMsgChannelAsset()) {
+                CNewAsset asset;
+                std::string strAddress;
+                if (MsgChannelAssetFromTransaction(tx, asset, strAddress))
+                    assetCache.AddNewAsset(asset, strAddress, pindex->nHeight, pindex->GetBlockHash());
+            } else if (tx.IsNewQualifierAsset()) {
+                CNewAsset asset;
+                std::string strAddress;
+                if (QualifierAssetFromTransaction(tx, asset, strAddress))
+                    assetCache.AddNewAsset(asset, strAddress, pindex->nHeight, pindex->GetBlockHash());
+            } else if (tx.IsNewRestrictedAsset()) {
+                CNewAsset asset;
+                std::string strAddress;
+                if (RestrictedAssetFromTransaction(tx, asset, strAddress)) {
+                    assetCache.AddNewAsset(asset, strAddress, pindex->nHeight, pindex->GetBlockHash());
+
+                    CNullAssetTxVerifierString verifier;
+                    std::string strError;
+                    if (tx.GetVerifierStringFromTx(verifier, strError))
+                        assetCache.AddRestrictedVerifier(asset.strName, verifier.verifier_string);
+                }
+            }
+        }
+
+        assetCache.Flush();
+        nBlocksProcessed++;
+
+        if (nHeight % nLogInterval == 0) {
+            LogPrintf("%s : phase 1, %d of %d blocks (%.1f%%)\n", __func__, nHeight, nTipHeight,
+                      100.0 * nHeight / nTipHeight);
+            uiInterface.ShowProgress(_("Rebuilding asset metadata..."), (int)(50.0 * nHeight / nTipHeight));
+
+            // Bound the memory this pass holds.
+            if (!passets->DumpCacheToDatabase())
+                return error("%s : failed to flush the metadata at height %d", __func__, nHeight);
+        }
+    }
+
+    if (!passets->DumpCacheToDatabase())
+        return error("%s : failed to write the asset metadata", __func__);
+
+    // Reload what phase 1 wrote, both for the RPCs and so phase 2 starts from
+    // the rebuilt metadata rather than the caches it cleared.
+    if (!passetsdb->LoadAssets())
+        return error("%s : failed to reload the asset metadata", __func__);
+
+    LogPrintf("%s : phase 1 complete, %d blocks processed\n", __func__, nBlocksProcessed);
+
+    // -------------------------------------------------------------------
+    // Phase 2: rebuild the address balances from the UTXO set.
+    // -------------------------------------------------------------------
+    LogPrintf("%s : phase 2, rebuilding address balances from the UTXO set\n", __func__);
+    uiInterface.InitMessage(_("Rebuilding asset balances..."));
+    uiInterface.ShowProgress(_("Rebuilding asset balances..."), 50);
+
+    // The cursor below reads the on-disk coins database, so anything still
+    // sitting in the tip cache has to be written out first or it is invisible.
+    FlushStateToDisk();
+
+    std::unique_ptr<CCoinsViewCursor> pcursor(pcoinsdbview->Cursor());
+    if (!pcursor)
+        return error("%s : failed to open a cursor over the UTXO set", __func__);
+
+    std::map<std::pair<std::string, std::string>, CAmount> mapBalances;
+    int64_t nScanned = 0;
+
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
+        if (ShutdownRequested())
+            return error("%s : interrupted after %d outputs during the balance pass", __func__, nScanned);
+
+        COutPoint key;
+        Coin coin;
+        if (pcursor->GetKey(key) && pcursor->GetValue(coin)) {
+            if (coin.IsAsset()) {
+                CAssetOutputEntry data;
+                if (GetAssetData(coin.out.scriptPubKey, data)) {
+                    const std::string address = EncodeDestination(data.destination);
+                    mapBalances[std::make_pair(data.assetName, address)] += data.nAmount;
+                }
+            }
+
+            if (++nScanned % 500000 == 0)
+                LogPrintf("%s : phase 2, scanned %d outputs\n", __func__, nScanned);
+        }
+
+        pcursor->Next();
+    }
+
+    // A zero balance is the absence of an entry, not an entry holding zero.
+    for (auto it = mapBalances.begin(); it != mapBalances.end();) {
+        if (it->second <= 0)
+            it = mapBalances.erase(it);
+        else
+            ++it;
+    }
+
+    LogPrintf("%s : phase 2, writing %u address balances from %d outputs\n", __func__, mapBalances.size(), nScanned);
+
+    if (!passetsdb->WriteAssetAddressQuantities(mapBalances))
+        return error("%s : failed to write the address balances", __func__);
+
+    passets->mapAssetsAddressAmount = mapBalances;
+
+    // -------------------------------------------------------------------
+    // Phase 3: rebuild the qualifier reverse index.
+    // -------------------------------------------------------------------
+    if (AreRestrictedAssetsDeployed() && prestricteddb) {
+        LogPrintf("%s : phase 3, rebuilding the qualifier address index\n", __func__);
+        uiInterface.ShowProgress(_("Rebuilding asset balances..."), 95);
+
+        if (!prestricteddb->RebuildQualifierAddressIndex())
+            return error("%s : failed to rebuild the qualifier address index", __func__);
+    }
+
+    uiInterface.ShowProgress("", 100);
+    LogPrintf("%s : complete, metadata from %d blocks and %u balances from the UTXO set\n", __func__,
+              nBlocksProcessed, mapBalances.size());
+    return true;
+}
+
 bool ReplayBlocks(const CChainParams& params, CCoinsView* view)
 {
     LOCK(cs_main);
