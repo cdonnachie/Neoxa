@@ -2831,7 +2831,18 @@ bool static FlushStateToDisk(const CChainParams& chainparams, CValidationState &
 
         int64_t nMempoolSizeMax = gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
         int64_t cacheSize = pcoinsTip->DynamicMemoryUsage() + assetDynamicSize + assetDirtyCacheSize + messageCacheSize;
-        cacheSize += evoDb->GetMemoryUsage();
+        // CDBTransaction::GetMemoryUsage() reports the encoded size of the
+        // pending writes, but the transaction retains the deserialized objects:
+        // ValueHolderImpl<V> keeps a copy of V, so nested containers keep their
+        // own nodes and heap, and neither the map node nor the key buffer
+        // (reserved to DBWRAPPER_PREALLOC_KEY_SIZE) is charged at all. For the
+        // per-block masternode list diffs - roughly 70 updatedMNs entries each,
+        // 50 bytes encoded against a map node holding a full
+        // CDeterministicMNState - the retained footprint is several times the
+        // encoded size. Scale the figure that gates the flush so a 300 MiB
+        // -dbcache does not let this transaction hold well over a gigabyte.
+        static const int EVODB_MEMORY_FACTOR = 8;
+        cacheSize += evoDb->GetMemoryUsage() * EVODB_MEMORY_FACTOR;
         int64_t nTotalSpace = nCoinCacheUsage + std::max<int64_t>(nMempoolSizeMax - nMempoolUsage, 0);
         // The cache is large and we're within 10% and 10 MiB of the limit, but we have time now (not in the middle of a block processing).
         bool fCacheLarge = mode == FLUSH_STATE_PERIODIC && cacheSize > std::max((9 * nTotalSpace) / 10, nTotalSpace - MAX_BLOCK_COINSDB_USAGE * 1024 * 1024);
