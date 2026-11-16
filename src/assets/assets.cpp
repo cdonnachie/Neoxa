@@ -2613,7 +2613,7 @@ bool CAssetsCache::DumpCacheToDatabase()
                     dirty = true;
                     message = "_Failed Writing address qualifier to database";
                 }
-                if (fAssetIndex & !dirty) {
+                if (fAssetIndex && !dirty) {
                     if (!prestricteddb->WriteQualifierAddress(newQualifierAddress.address, newQualifierAddress.assetName))
                     {
                         dirty = true;
@@ -2635,7 +2635,7 @@ bool CAssetsCache::DumpCacheToDatabase()
                     dirty = true;
                     message = "_Failed undoing a removal of a address qualifier  from database";
                 }
-                if (fAssetIndex & !dirty) {
+                if (fAssetIndex && !dirty) {
                     if (!prestricteddb->WriteQualifierAddress(undoQualifierAddress.address, undoQualifierAddress.assetName))
                     {
                         dirty = true;
