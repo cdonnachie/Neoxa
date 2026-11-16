@@ -1822,8 +1822,15 @@ bool AppInitMain(boost::thread_group& threadGroup, CScheduler& scheduler)
     nCoinCacheUsage = nTotalCache; // the rest goes to in-memory cache
     int64_t nMempoolSizeMax = gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
     int64_t nEvoDbCache = 1024 * 1024 * 16; // TODO
+    // The asset, messaging, restricted and snapshot databases were all sized
+    // from nBlockTreeDBCache, so the real commitment was nine times the block
+    // index figure logged below. The main asset and restricted databases are
+    // read during validation and keep their budget; the rest are small and
+    // rarely touched, so give them a fixed cache.
+    int64_t nAuxDBCache = 1024 * 1024 * 4;
     LogPrintf("Cache configuration:\n");
     LogPrintf("* Using %.1fMiB for block index database\n", nBlockTreeDBCache * (1.0 / 1024 / 1024));
+    LogPrintf("* Using %.1fMiB each for the asset and restricted databases, %.1fMiB each for 6 auxiliary databases\n", nBlockTreeDBCache * (1.0 / 1024 / 1024), nAuxDBCache * (1.0 / 1024 / 1024));
     LogPrintf("* Using %.1fMiB for chain state database\n", nCoinDBCache * (1.0 / 1024 / 1024));
     LogPrintf("* Using %.1fMiB for in-memory UTXO set (plus up to %.1fMiB of unused mempool space)\n", nCoinCacheUsage * (1.0 / 1024 / 1024), nMempoolSizeMax * (1.0 / 1024 / 1024));
 
@@ -1893,11 +1900,11 @@ bool AppInitMain(boost::thread_group& threadGroup, CScheduler& scheduler)
                     pMessagesCache = new CLRUCache<std::string, CMessage>(1000);
                     pMessageSubscribedChannelsCache = new CLRUCache<std::string, int>(1000);
                     pMessagesSeenAddressCache = new CLRUCache<std::string, int>(1000);
-                    pmessagedb = new CMessageDB(nBlockTreeDBCache, false, false);
-                    pmessagechanneldb = new CMessageChannelDB(nBlockTreeDBCache, false, false);
+                    pmessagedb = new CMessageDB(nAuxDBCache, false, false);
+                    pmessagechanneldb = new CMessageChannelDB(nAuxDBCache, false, false);
 
                     // My restricted assets
-                    pmyrestricteddb = new CMyRestrictedDB(nBlockTreeDBCache, false, false);
+                    pmyrestricteddb = new CMyRestrictedDB(nAuxDBCache, false, false);
 
                     // Restricted assets
                     prestricteddb = new CRestrictedDB(nBlockTreeDBCache, false, fReset);
@@ -1908,9 +1915,9 @@ bool AppInitMain(boost::thread_group& threadGroup, CScheduler& scheduler)
                     passetsGlobalRestrictionCache = new CLRUCache<std::string, int8_t>(MAX_CACHE_ASSETS_SIZE);
 
                     // Rewards
-                    pSnapshotRequestDb = new CSnapshotRequestDB(nBlockTreeDBCache, false, false);
-                    pAssetSnapshotDb = new CAssetSnapshotDB(nBlockTreeDBCache, false, false);
-                    pDistributeSnapshotDb = new CDistributeSnapshotRequestDB(nBlockTreeDBCache, false, false);
+                    pSnapshotRequestDb = new CSnapshotRequestDB(nAuxDBCache, false, false);
+                    pAssetSnapshotDb = new CAssetSnapshotDB(nAuxDBCache, false, false);
+                    pDistributeSnapshotDb = new CDistributeSnapshotRequestDB(nAuxDBCache, false, false);
 
                     // Read for fAssetIndex to make sure that we only load asset address balances if it if true
                     pblocktree->ReadFlag("assetindex", fAssetIndex);
