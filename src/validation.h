@@ -138,7 +138,12 @@ static const int64_t MAX_FEE_ESTIMATION_TIP_AGE = 3 * 60 * 60;
 static const bool DEFAULT_PERMIT_BAREMULTISIG = true;
 static const bool DEFAULT_CHECKPOINTS_ENABLED = true;
 static const bool DEFAULT_TXINDEX = true;
-static const bool DEFAULT_ASSETINDEX = false;
+// The asset layer is not optional in a Ravencoin fork: without the asset index
+// the address-level asset data is never written, so listaddressesbyasset,
+// listassetbalancesbyaddress and every rewards RPC return an error instead of a
+// result, and the only way to obtain them later is a full reindex. Default it on
+// so a node is useful for the chain it is running.
+static const bool DEFAULT_ASSETINDEX = true;
 static const bool DEFAULT_ADDRESSINDEX = false;
 static const bool DEFAULT_TIMESTAMPINDEX = false;
 static const bool DEFAULT_SPENTINDEX = false;

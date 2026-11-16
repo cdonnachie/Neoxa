@@ -542,6 +542,7 @@ std::string HelpMessage(HelpMessageMode mode)
 #endif
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), DEFAULT_TXINDEX));
 
+    strUsage += HelpMessageOpt("-assetindex", strprintf(_("Maintain a full asset index, used to query asset balances by address and required by the rewards rpc calls (default: %u)"), DEFAULT_ASSETINDEX));
     strUsage += HelpMessageOpt("-addressindex", strprintf(_("Maintain a full address index, used to query for the balance, txids and unspent outputs for addresses (default: %u)"), DEFAULT_ADDRESSINDEX));
     strUsage += HelpMessageOpt("-timestampindex", strprintf(_("Maintain a timestamp index for block hashes, used to query blocks hashes by a range of timestamps (default: %u)"), DEFAULT_TIMESTAMPINDEX));
     strUsage += HelpMessageOpt("-spentindex", strprintf(_("Maintain a full spent index, used to query the spending txid and input index for an outpoint (default: %u)"), DEFAULT_SPENTINDEX));
@@ -1989,6 +1990,15 @@ bool AppInitMain(boost::thread_group& threadGroup, CScheduler& scheduler)
                 // Check for changed -spentindex state
                 if (fSpentIndex != gArgs.GetBoolArg("-spentindex", DEFAULT_SPENTINDEX)) {
                     strLoadError = _("You need to rebuild the database using -reindex to change -spentindex");
+                    break;
+                }
+
+                // Check for changed -assetindex state. Without this a node that
+                // adds -assetindex to an existing datadir silently keeps the
+                // flag stored on disk, and the asset RPCs go on reporting that
+                // -assetindex is disabled with no indication why.
+                if (fAssetIndex != gArgs.GetBoolArg("-assetindex", DEFAULT_ASSETINDEX)) {
+                    strLoadError = _("You need to rebuild the database using -reindex to change -assetindex");
                     break;
                 }
 
