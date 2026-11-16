@@ -2997,7 +2997,7 @@ bool CAssetsCache::Flush()
 
         for (auto &item : mapRootQualifierAddressesRemove) {
             for (auto asset : item.second) {
-                passets->mapRootQualifierAddressesAdd[item.first].insert(asset);
+                passets->mapRootQualifierAddressesRemove[item.first].insert(asset);
             }
         }
 
