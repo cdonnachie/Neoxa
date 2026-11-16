@@ -3850,6 +3850,20 @@ static bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state,
         }
     }
 
+    // The KawPow epoch context is sized from the header's own nHeight claim -
+    // 16 MiB plus 128 KiB for every 7500 blocks - and it has to be built
+    // before the proof of work can be checked below. ContextualCheckBlockHeader
+    // binds nHeight to the parent's height, but it runs after this function, so
+    // here nHeight is still whatever the sender put in the header. Refuse a
+    // claim far beyond any height this chain can plausibly have reached, so the
+    // size of that allocation stays bounded. At 16M the context is capped near
+    // 280 MiB, which is decades of headroom at this block interval.
+    static const uint32_t MAX_PLAUSIBLE_KAWPOW_HEIGHT = 16000000;
+    if (fCheckPOW && block.nTime >= 1651444217 && block.nHeight > MAX_PLAUSIBLE_KAWPOW_HEIGHT) {
+        return state.DoS(50, false, REJECT_INVALID, "bad-height-range", false,
+                         strprintf("header nHeight %u is not a plausible chain height", block.nHeight));
+    }
+
     uint256 mix_hash;
     // Check proof of work matches claimed amount
     if (fCheckPOW && !CheckProofOfWork(block.GetHashFull(mix_hash), block.nBits, consensusParams)) {

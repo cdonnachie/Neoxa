@@ -7,9 +7,13 @@
 #include "crypto/common.h"
 #include "crypto/hmac_sha512.h"
 #include "pubkey.h"
+#include "sync.h"
 #include "util.h"
 
 #include <crypto/ethash/include/ethash/progpow.hpp>
+
+#include <map>
+#include <memory>
 
 inline uint32_t ROTL32(uint32_t x, int8_t r)
 {
@@ -251,15 +255,66 @@ uint64_t SipHashUint256Extra(uint64_t k0, uint64_t k1, const uint256& val, uint3
 }
 
 
+namespace {
+//! Cache of KawPow epoch contexts.
+//!
+//! An epoch context is 16 MiB plus 128 KiB per 7500-block epoch, populated by
+//! hashing hundreds of thousands of items, so building one is expensive. The
+//! header-processing path, the block-download path and the block-validation
+//! path all hash headers, and during initial block download they sit at widely
+//! separated heights, so a single-entry cache is torn down and rebuilt every
+//! time two of them alternate. Hold a few contexts so they stop evicting each
+//! other; the ceiling is MAX_EPOCH_CONTEXTS times the current context size.
+//!
+//! The cache is shared between threads, so it needs the lock. The single
+//! static it replaces was read and reassigned with no synchronisation at all,
+//! which can free a context while another thread is still hashing against it.
+CCriticalSection cs_epoch_contexts;
+std::map<int, std::shared_ptr<ethash::epoch_context>> epoch_contexts;
+const size_t MAX_EPOCH_CONTEXTS = 3;
+
+std::shared_ptr<ethash::epoch_context> GetEpochContext(int epoch_number)
+{
+    LOCK(cs_epoch_contexts);
+
+    auto it = epoch_contexts.find(epoch_number);
+    if (it != epoch_contexts.end())
+        return it->second;
+
+    auto context = ethash::create_epoch_context(epoch_number);
+    if (!context)
+        return nullptr; // out of memory
+
+    // Evict whichever cached epoch is furthest from the one wanted now.
+    auto distance = [epoch_number](int epoch) {
+        return epoch > epoch_number ? epoch - epoch_number : epoch_number - epoch;
+    };
+    while (epoch_contexts.size() >= MAX_EPOCH_CONTEXTS) {
+        auto furthest = epoch_contexts.begin();
+        for (auto i = epoch_contexts.begin(); i != epoch_contexts.end(); ++i) {
+            if (distance(i->first) > distance(furthest->first))
+                furthest = i;
+        }
+        epoch_contexts.erase(furthest);
+    }
+
+    return epoch_contexts.emplace(epoch_number, std::move(context)).first->second;
+}
+} // namespace
+
 uint256 KAWPOWHash(const CBlockHeader& blockHeader, uint256& mix_hash)
 {
-    static ethash::epoch_context_ptr context{nullptr, nullptr};
-
     // Get the context from the block height
     const auto epoch_number = ethash::get_epoch_number(blockHeader.nHeight);
 
-    if (!context || context->epoch_number != epoch_number)
-        context = ethash::create_epoch_context(epoch_number);
+    auto context = GetEpochContext(epoch_number);
+    if (!context) {
+        // The epoch context could not be built. Return a hash that cannot
+        // satisfy any target, rather than a null hash that would sail through
+        // CheckProofOfWork.
+        mix_hash.SetNull();
+        return uint256S("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    }
 
     // Build the header_hash
     uint256 nHeaderHash = blockHeader.GetKAWPOWHeaderHash();
